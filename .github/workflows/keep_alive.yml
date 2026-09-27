@@ -2,9 +2,9 @@ name: Bot Hosting Keep Alive
 
 on:
   schedule:
-    # 每天 UTC 03:00 和 15:00 运行两次（对应北京时间 11:00 和 23:00）
+    # 每天 UTC 03:00 和 15:00 运行两次（北京时间 11:00 和 23:00）
     - cron: '0 3,15 * * *'
-  workflow_dispatch: # 支持手动点击运行测试
+  workflow_dispatch: # 支持手动触发测试
 
 jobs:
   keep-alive:
@@ -18,14 +18,113 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 安装依赖
+      - name: 安装 Python 依赖
         run: |
           python -m pip install --upgrade pip
           pip install curl_cffi
+
+      - name: 下载并启动 sing-box 本地 SOCKS5 代理
+        env:
+          V2RAY_NODE: ${{ secrets.V2RAY_NODE }}
+        run: |
+          if [ -z "$V2RAY_NODE" ]; then
+            echo "⚠️ 未配置 V2RAY_NODE，将不使用本地代理直接发起请求。"
+          else
+            echo "🚀 正在下载 sing-box 内核..."
+            curl -fsSL https://github.com/SagerNet/sing-box/releases/download/v1.8.11/sing-box-1.8.11-linux-amd64.tar.gz -o sing-box.tar.gz
+            tar -xzf sing-box.tar.gz
+            mv sing-box-1.8.11-linux-amd64/sing-box ./sing-box
+            chmod +x ./sing-box
+
+            echo "⚙️ 正在转换节点配置..."
+            # 调用 Python 生成 sing-box 配置文件 config.json
+            python3 -c "
+            import sys, os, json, base64, urllib.parse
+
+            node = os.getenv('V2RAY_NODE', '').strip()
+            if not node:
+                sys.exit(0)
+
+            # 解析 VMess 节点
+            if node.startswith('vmess://'):
+                b64_data = node[8:]
+                # 补全 padding
+                b64_data += '=' * (-len(b64_data) % 4)
+                info = json.loads(base64.b64decode(b64_data).decode('utf-8'))
+                
+                outbound = {
+                    'type': 'vmess',
+                    'tag': 'proxy',
+                    'server': info['add'],
+                    'server_port': int(info['port']),
+                    'uuid': info['id'],
+                    'security': info.get('scy', 'auto'),
+                    'alter_id': int(info.get('aid', 0))
+                }
+                if info.get('net') == 'ws':
+                    outbound['transport'] = {
+                        'type': 'ws',
+                        'path': info.get('path', '/'),
+                        'headers': {'Host': info.get('host', info['add'])}
+                    }
+                if info.get('tls') == 'tls':
+                    outbound['tls'] = {
+                        'enabled': True,
+                        'server_name': info.get('host', info['add']),
+                        'insecure': True
+                    }
+
+            # 解析 VLESS 节点
+            elif node.startswith('vless://'):
+                url = urllib.parse.urlparse(node)
+                query = urllib.parse.parse_qs(url.query)
+                outbound = {
+                    'type': 'vless',
+                    'tag': 'proxy',
+                    'server': url.hostname,
+                    'server_port': url.port,
+                    'uuid': url.username,
+                    'flow': query.get('flow', [''])[0]
+                }
+                if query.get('type', [''])[0] == 'ws':
+                    outbound['transport'] = {
+                        'type': 'ws',
+                        'path': query.get('path', ['/'])[0],
+                        'headers': {'Host': query.get('host', [url.hostname])[0]}
+                    }
+                if query.get('security', [''])[0] in ['tls', 'reality']:
+                    outbound['tls'] = {
+                        'enabled': True,
+                        'server_name': query.get('sni', [url.hostname])[0],
+                        'insecure': True
+                    }
+
+            config = {
+                'inbounds': [{
+                    'type': 'socks',
+                    'tag': 'socks-in',
+                    'listen': '127.0.0.1',
+                    'listen_port': 10808
+                }],
+                'outbounds': [outbound]
+            }
+
+            with open('config.json', 'w') as f:
+                json.dump(config, f, indent=2)
+            print('✅ config.json 配置文件生成成功！')
+            "
+
+            if [ -f "config.json" ]; then
+              echo "🔄 启动 sing-box 后台服务 (SOCKS5 监听于 127.0.0.1:10808)..."
+              ./sing-box run -c config.json > singbox.log 2>&1 &
+              sleep 3
+            fi
+          fi
 
       - name: 执行保活任务
         env:
           USER_COOKIE: ${{ secrets.USER_COOKIE }}
           BOT_ID: ${{ secrets.BOT_ID }}
+          PROXY_URL: "socks5://127.0.0.1:10808"
         run: |
           python keep_alive.py
