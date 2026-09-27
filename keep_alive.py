@@ -48,7 +48,7 @@ def keep_alive():
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    bots_page_url = "https://anikbothosting.de/my-bots.php"
+    bots_page_url = "https://anikbothosting.de/"
     bot_detail_url = f"https://anikbothosting.de/bot-details.php?id={bot_id}"
 
     try:
